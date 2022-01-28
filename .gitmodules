@@ -1,0 +1,3 @@
+[submodule "aircraft-localization"]
+	path = aircraft-localization
+	url = https://github.com/openskynetwork/aircraft-localization
