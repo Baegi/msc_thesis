@@ -8,7 +8,7 @@ if len(sys.argv) != 7:
 
 locards_sensors_f = open(sys.argv[1], "r")
 locards_msgs_f = open(sys.argv[2], "r")
-
+1
 custom_sensors_f = open(sys.argv[3], "r")
 custom_msgs_f = open(sys.argv[4], "r")
 
