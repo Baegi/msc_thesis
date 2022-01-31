@@ -1,19 +1,26 @@
 import pyModeS as pms
 from pyModeS.decoder.adsb import position
 from collections import defaultdict
+from geopy import distance
+import math
 
 class GeoPoint:
-    def __init__(self, longitude, latitude, altitude) -> None:
-        self.lon = longitude
+    def __init__(self, latitude, longitude, altitude) -> None:
         self.lat = latitude
+        self.lon = longitude
         self.alt = altitude
+
+    def dist(self, other):
+        flat_dist = distance.distance((self.lat, self.lon), (other.lat, other.lon)).m
+        # inaccurately throw mister pythagoras into the calculation
+        return math.sqrt(flat_dist**2 + (self.alt - other.alt)**2)
 
 
 last_loc_msg = defaultdict(lambda: [None, None])
 plane_tracks = defaultdict(list)
 
 
-def get_pos(msg, timestamp):
+def get_announced_pos(msg, timestamp):
     icao = pms.icao(msg).upper()
     oe_bit = pms.decoder.adsb.oe_flag(msg)
     last_loc_msg[icao][oe_bit] = (timestamp, msg)
@@ -34,7 +41,7 @@ def get_pos(msg, timestamp):
 
         pos = pos or [None, None]
 
-        geo_pos = GeoPoint(pos[1], pos[0], alt)
+        geo_pos = GeoPoint(*pos, alt)
         return geo_pos
 
     return None
