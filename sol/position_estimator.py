@@ -26,6 +26,9 @@ class GeoPoint:
     def __str__(self) -> str:
         return f"Latitude: {self.lat}, Longitude: {self.lon}, Altitude: {self.alt}"
 
+    def __repr__(self) -> str:
+        return self.__str__()
+
     
     def __hash__(self) -> int:
         return hash((self.lon, self.lat, self.alt))
