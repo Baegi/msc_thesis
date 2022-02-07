@@ -6,6 +6,9 @@ import math
 
 class GeoPoint:
     def __init__(self, latitude, longitude, altitude) -> None:
+        assert -90 <= latitude <= 90
+        assert -180 <= longitude <= 180
+
         self.lat = latitude
         self.lon = longitude
         self.alt = altitude
@@ -15,6 +18,17 @@ class GeoPoint:
         # inaccurately throw mister pythagoras into the calculation
         return math.sqrt(flat_dist**2 + (self.alt - other.alt)**2)
 
+
+    def __eq__(self, __o: object) -> bool:
+        return self.lat == __o.lat and self.lon == __o.lon and self.alt == __o.alt
+
+    
+    def __str__(self) -> str:
+        return f"Latitude: {self.lat}, Longitude: {self.lon}, Altitude: {self.alt}"
+
+    
+    def __hash__(self) -> int:
+        return hash((self.lon, self.lat, self.alt))
 
 last_loc_msg = defaultdict(lambda: [None, None])
 plane_tracks = defaultdict(list)
@@ -55,3 +69,5 @@ def is_relevant(msg):
             return True
     
     return False
+
+
