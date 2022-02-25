@@ -15,11 +15,11 @@ def calc_timedeltas(msg_pos, sensor_vals):
     if len(sensor_vals) < 2:
         return dict(time_delta)
 
-    for t, s in list(sensor_vals):
-        dists = sorted([s[0].dist(e[1][0]) for e in sensor_vals if e[1] != s])
-        if dists[int(len(dists)/10)] > 1e6: # ge 1000 km
-            print("removing:", t, s, dists)
-            sensor_vals.remove((t, s))
+    #for t, s in list(sensor_vals):
+    #    dists = sorted([s[0].dist(e[1][0]) for e in sensor_vals if e[1] != s])
+    #    if dists[int(len(dists)/10)] > 1e6: # ge 1000 km
+    #        print("removing:", t, s, dists)
+    #        sensor_vals.remove((t, s))
 
     try:
         sensor_dists_to_msg_origin = {x[1]: msg_pos.dist(x[1][0]) for x in sensor_vals}

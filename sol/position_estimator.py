@@ -3,6 +3,7 @@ from pyModeS.decoder.adsb import position
 from collections import defaultdict
 from geopy import distance
 import math
+import pyproj
 
 class GeoPoint:
     def __init__(self, latitude, longitude, altitude) -> None:
@@ -12,6 +13,7 @@ class GeoPoint:
         self.lat = latitude
         self.lon = longitude
         self.alt = altitude
+
 
     def dist(self, other):
         flat_dist = distance.distance((self.lat, self.lon), (other.lat, other.lon)).m
