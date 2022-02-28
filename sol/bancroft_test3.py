@@ -11,7 +11,7 @@ class Vertexer:
     nodes: np.ndarray
 
     # Defaults
-    v = 299792
+    v = 299792458
 
     def __post_init__(self):
         # Calculate valid input range
@@ -87,6 +87,7 @@ class Vertexer:
             #X, Y, Z, T = M @ np.linalg.solve(, Lambda * np.ones(len(self.nodes)) + b)
             X, Y, Z, T = np.matmul(A_plus, (b + Lambda * np.ones(len(self.nodes))))
             solution.append(np.array([X,Y,Z]))
+            print("Candidate:", X, Y, Z, math.sqrt(X**2 + Y**2 + Z**2))
     
         print()
         print()
@@ -97,7 +98,7 @@ class Vertexer:
 #
 
 # Set velocity
-c = 299792 # km/ns
+c = 299792458 # m/s
 
 # Pick nodes to be at random locations
 x_1 = c; y_1 = 0; z_1 = 0
@@ -126,10 +127,10 @@ sensor_positions = [
     [ c, 0, 0 ],
     [ 0, c, 0 ],
     [ 0, 0, c ],
-    [ 3*c, 4*c, 0 ],
-    [ c, 0, 0 ]
+    [ 0, -c, 0 ],
+    [ -c, 0, 0 ]
 ]
 
-timestamps = [ 1,1,1,5,1.1 ]
+timestamps = [ 1,1,1,.99999, 1.000001 ]
 myVertexer = Vertexer(np.array(sensor_positions))
 print(myVertexer.find(np.array([[e] for e in timestamps])))
