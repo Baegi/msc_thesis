@@ -36,10 +36,13 @@ class GeoPoint:
     def pos(self):
         return self.x, self.y, self.z
 
+    def __str__(self) -> str:
+        return('ecef: ' + str(self.pos()))
+
 
 def connect_db():
     global conn, cur
-    if "conn" not in globals() or "cur" not in globals():
+    if "conn" not in globals() or "cur" not in globals() or conn.closed:
         #conn = sqlite3.connect("data.sqlite")
         conn = psycopg2.connect("dbname=thesis user=postgres password=postgres")
         cur = conn.cursor()
@@ -81,6 +84,33 @@ def init_db():
         PRIMARY KEY (msg_id, sensor_id),
         FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE,
         FOREIGN KEY (sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
+    );''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS time_deltas (
+        sensor_a integer,
+        sensor_b integer,
+        mean double precision,
+        variance double precision,
+        num integer,
+        PRIMARY KEY (sensor_a, sensor_b),
+        FOREIGN KEY (sensor_a) REFERENCES sensors(id) ON DELETE CASCADE,
+        FOREIGN KEY (sensor_b) REFERENCES sensors(id) ON DELETE CASCADE,
+        CONSTRAINT sensor_id_check CHECK (sensor_a < sensor_b)
+    );''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS msg_positions_raw (
+        msg_id integer PRIMARY KEY,
+        ecef_x double precision,
+        ecef_y double precision,
+        ecef_z double precision,
+        FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE
+    );''')
+
+    cur.execute('''CREATE TABLE IF NOT EXISTS msg_positions_corrected (
+        msg_id integer PRIMARY KEY,
+        ecef_x double precision,
+        ecef_y double precision,
+        ecef_z double precision,
+        FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE
     );''')
 
     conn.commit()
@@ -274,6 +304,7 @@ def cleanup_sensors(variance_cutoff=10):
     # remove sensors with only one record
     cur.execute('''
         SELECT sensor_id FROM records
+        GROUP BY sensor_id
         HAVING COUNT(msg_id) < 2
     ''')
 
@@ -285,6 +316,24 @@ def cleanup_sensors(variance_cutoff=10):
     ''', bad_sensors)
 
     conn.commit()
+
+
+def cleanup_messages():
+    # delete messages that only got received by one sensor
+    cur.execute('''SELECT msg_id FROM records
+        GROUP BY msg_id
+        HAVING COUNT(*) = 1    
+    ''')
+    bad_msgs = cur.fetchall()
+    print("Deleting", len(bad_msgs), "messages")
+
+    cur.executemany('''DELETE FROM messages WHERE id = %s''', bad_msgs)
+
+    cur.execute('''DELETE FROM messages
+        WHERE ecef_x = '+infinity'
+        OR ecef_y = '+infinity'
+        OR ecef_z = '+infinity'
+    ''')
 
 
 def get_table_length(table):
