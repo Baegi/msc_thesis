@@ -3,6 +3,10 @@ from tqdm.notebook import tqdm
 from dataclasses import dataclass
 import numpy as np
 import statistics
+from mpl_toolkits import mplot3d
+import matplotlib.pyplot as plt
+from collections import deque
+import random
 
 M = np.diag([1, 1, 1, -1])
 
@@ -171,7 +175,7 @@ def calc_positions(variance_cutoff=1e-6):
         time_deltas[s2][s1] = (-mean, var)
 
     
-    util.cur.execute('''DELETE FROM msg_positions''')
+    util.cur.execute('''DELETE FROM msg_positions_raw''')
 
     util.cur.execute('''SELECT msg_id, ARRAY_AGG(sensor_id), ARRAY_AGG(sensor_timestamp)
         FROM records
@@ -199,7 +203,7 @@ def calc_positions(variance_cutoff=1e-6):
             #print(":(")
             continue
         #print(pos)
-        util.cur.execute('''INSERT INTO msg_positions VALUES (
+        util.cur.execute('''INSERT INTO msg_positions_raw VALUES (
             %s, %s, %s, %s
         )''', (msg_id, *pos.pos()))
 
@@ -211,7 +215,7 @@ def summarize_accuracy():
     util.cur.execute('''SELECT COUNT(*) FROM messages''')
     print("Number of received messages:", util.cur.fetchone())
 
-    util.cur.execute('''SELECT COUNT(*) FROM msg_positions''')
+    util.cur.execute('''SELECT COUNT(*) FROM msg_positions_raw''')
     print("Number of calculated positions:", util.cur.fetchone())
 
     util.cur.execute('''
@@ -222,7 +226,7 @@ def summarize_accuracy():
         ) AS dist
 
         FROM messages msg
-        JOIN msg_positions msg_pos
+        JOIN msg_positions_raw msg_pos
         ON msg.id = msg_pos.msg_id
     ''')
 
@@ -234,3 +238,72 @@ def summarize_accuracy():
     print("Mean dist:", statistics.mean(dists))
     print("Median dist:", statistics.median(dists))
 
+
+def visualize_flight_paths(stage):
+    assert stage in ['raw', 'corrected']
+
+    util.conn.commit()
+    util.cur.execute(f'''
+        SELECT
+            ARRAY_AGG((pos.msg_id, pos.ecef_x, pos.ecef_y, pos.ecef_z) ORDER BY pos.msg_id ASC),
+            ARRAY_AGG((pos.msg_id, messages.ecef_x, messages.ecef_y, messages.ecef_z) ORDER BY pos.msg_id ASC)
+        FROM msg_positions_{stage} pos
+        JOIN messages ON messages.id = pos.msg_id
+        GROUP BY messages.icao
+    ''',)
+
+    for calculated, actual in random.sample(util.cur.fetchall(), 5):
+        # all messages in a path
+        calculated = list(sorted([list(eval(e)) for e in eval(calculated)]))
+        actual = list(sorted([list(eval(e)) for e in eval(actual)]))
+        print("N messages:", len(calculated))
+
+        fig = plt.figure()
+        ax = plt.axes(projection='3d')
+
+        ax.plot3D(*list(zip(*calculated))[1:], 'gray')
+        ax.plot3D(*list(zip(*actual))[1:], 'red')
+
+
+def post_process_positions():
+    # possible improvement:
+    # take into account temporal data, i.e. constrain changes in velocity
+
+    util.cur.execute('DELETE FROM msg_positions_corrected')
+
+    util.cur.execute('''
+        SELECT
+            ARRAY_AGG((pos.msg_id, pos.ecef_x, pos.ecef_y, pos.ecef_z) ORDER BY pos.msg_id ASC),
+            ARRAY_AGG((pos.msg_id, messages.ecef_x, messages.ecef_y, messages.ecef_z) ORDER BY pos.msg_id ASC)
+        FROM msg_positions_raw pos
+        JOIN messages ON messages.id = pos.msg_id
+        GROUP BY messages.icao
+    ''')
+
+    WINDOW_SIZE = 20
+    OUTLIER_DISTANCE_CUTOFF = 200000 # 20km
+    for messages in tqdm(util.cur.fetchall()):
+        # all messages in a path
+        messages = list(sorted([list(eval(e)) for e in eval(messages[0])]))
+        points = [util.GeoPoint('ecef', *e[1:]) for e in messages]
+
+        bad_msgs = set()
+        # first, remove outliers
+        for i in range(len(points)):
+            # sliding window shenanigans
+            for j in range(max(0, i-WINDOW_SIZE//2), min(len(points), i + (WINDOW_SIZE+1)//2)):
+                if i == j:
+                    continue
+                if points[i].dist(points[j]) < OUTLIER_DISTANCE_CUTOFF:
+                    break
+            else:
+                bad_msgs.add(messages[i][0])
+
+        util.cur.executemany('''INSERT INTO msg_positions_corrected VALUES(
+            %s, %s, %s, %s
+        )''', ([e for e in messages if e[0] not in bad_msgs]))
+        
+        print("Removed", len(bad_msgs), "/", len(messages), "positions")
+
+
+        
