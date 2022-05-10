@@ -10,8 +10,10 @@ import matplotlib.pyplot as plt
 from collections import defaultdict, deque
 import random
 import traceback
+import sympy
 
 M = np.diag([1, 1, 1, -1])
+C = 299792458
 
 @dataclass
 class Vertexer:
@@ -61,8 +63,10 @@ class Vertexer:
             print(self.nodes)
             print("times")
             print(times)
+            print("times * v")
+            print(list(zip(np.multiply(times, self.v))))
 
-        A = np.append(self.nodes, times * self.v, axis = 1)
+        A = np.append(self.nodes, list(zip(np.multiply(times, self.v))), axis = 1)
         if debug:
             print("A:")
             print(A)
@@ -112,8 +116,6 @@ class Vertexer:
         #print()
         #print()
         return min(solution, key = lambda err: self.errFunc(err, times))
-
-
 
 
 def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debug=False):
@@ -219,6 +221,136 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debu
         pass
 
 
+def calc_mlat_sympy(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debug=False):
+    assert len(sensor_ids) >= 4
+
+    if debug:
+        print("N Sensors:", len(sensor_ids))
+
+    # select sensor subset for mlat
+    relevant_sensors = list()
+    for sensor_id in sensor_ids:
+        if not len(relevant_sensors):
+            relevant_sensors.append(sensor_id)
+            td_base_sensor = sensor_id
+            continue
+        if td_base_sensor in time_deltas and sensor_id in time_deltas[td_base_sensor]:
+            relevant_sensors.append(sensor_id)
+
+    if debug:
+        print("Initial sensor subset:", relevant_sensors)
+
+    if len(relevant_sensors) < 4:
+        if debug:
+            print("Not enough initally connected sensors")
+        return
+
+    while len(relevant_sensors) > 4 and False:
+        # find worst of the relevant sensors and potentially exclude it
+        variance_sums = defaultdict(float)
+        variance_n = defaultdict(int)
+        for i, j in itertools.combinations(relevant_sensors, 2):
+            if i in time_deltas and j in time_deltas[i]:
+                v = time_deltas[i][j][1]
+                variance_sums[i] += v
+                variance_sums[j] += v
+                variance_n[i] += 1
+                variance_n[j] += 1
+
+        for i in variance_sums:
+            if variance_n[i] > 0:
+                variance_sums[i] /= variance_n[i]
+        sorted_var_sums = sorted(variance_sums.items(), key=lambda e: e[1], reverse=True)
+        if sorted_var_sums[0][1] > 2* statistics.median(variance_sums.values()):
+            relevant_sensors.remove(sorted_var_sums[0][0])
+        else:
+            break
+        
+    if debug:
+        print("Using", len(relevant_sensors), "/", len(sensor_ids), "sensors for MLAT")
+        print(relevant_sensors)
+
+    locations = [sensor_locations[e].pos() for e in relevant_sensors]
+
+    # prepare timestamps
+    timestamps = [0] # zero represents td_base
+    for sensor_id in relevant_sensors[1:]:
+        timestamps.append(
+            sensor_timestamps[sensor_id] + time_deltas[td_base_sensor][sensor_id][0]
+            - sensor_timestamps[td_base_sensor]
+        )
+    
+    if debug:
+        print("corrected timestamps:", timestamps)
+
+    n = len(relevant_sensors)
+
+    # Now the real math shenanigans begin
+
+    def lorentz_inner(v, w):
+        if debug:
+            print("v", sympy.shape(v), v)
+            print("w", sympy.shape(w), w)
+        assert sympy.shape(v) == (4, 1)
+        assert sympy.shape(w) == (4, 1)
+        M = sympy.diag(1, 1, 1, -1)
+        return ((M * v).T * w)[0]
+
+    a = 0.5 * sympy.Matrix([lorentz_inner(sympy.Matrix([*locations[i], timestamps[i] * C]), sympy.Matrix([*locations[i], timestamps[i] * C])) for i in range(n)])
+
+    e = sympy.ones(n, 1)
+
+    B = sympy.Matrix([[*locations[i], -timestamps[i] * C] for i in range(n)])
+    if debug:
+        print("B:")
+        print(B)
+        print("a:")
+        print(a)
+        print("e:")
+        print(e)
+
+
+    Lambda, u1, u2, u3, u4 = sympy.symbols('lambda u1 u2 u3 u4', real=True)
+    u = sympy.Matrix([u1, u2, u3, u4])
+    solutions = sympy.solve([
+        Lambda - 0.5*lorentz_inner(u, u),
+        B.T*B*u - B.T*(a+Lambda*e)
+    ], Lambda, u1, u2, u3, u4)
+
+    if debug:
+        print("Possible solutions:", solutions)
+    
+    best_sol = 1e9, None
+    for sol in solutions:
+        Lambda, u1, u2, u3, u4 = sol
+        loc = util.GeoPoint('ecef', u1, u2, u3)
+        dist = loc.dist(sensor_locations[relevant_sensors[0]])
+        best_sol = min(best_sol, (dist, loc))
+        
+    return best_sol[1]
+
+
+    B_plus = (B.T*B)**-1 * B.T
+
+    coef_2 = lorentz_inner(B_plus * e, B_plus * e)
+    coef_1 = 2 * (lorentz_inner(B_plus * a, B_plus * e) - 1)
+    coef_0 = lorentz_inner(B_plus * a, B_plus * a)
+
+    if debug:
+        print("Lambda sq system coefficients:")
+        print(type(coef_2), coef_2)
+        print(type(coef_1), coef_1)
+        print(type(coef_0), coef_0)
+
+    Lambda = sympy.symbols('Lambda', real=True)
+    lambda_solutions = sympy.solveset(
+        Lambda**2 * coef_2 + Lambda * + coef_1 + coef_0, Lambda, maxsteps=1000
+    )
+
+    if debug:
+        print("Possible lambdas:", lambda_solutions)
+
+
 
 def calc_positions(variance_cutoff=1e-6):
 
@@ -248,13 +380,13 @@ def calc_positions(variance_cutoff=1e-6):
     it = 0
     for msg_id, sensor_ids, sensor_timestamps in tqdm(util.cur.fetchall()):
         it += 1
-        if it > 10000 and False:
+        if it > 100 and True:
             break
 
         assert len(sensor_timestamps) == len(sensor_ids)
         
         #print(msg_id, sensor_ids, sensor_timestamps)
-        pos = calc_mlat(
+        pos = calc_mlat_sympy(
             sensor_ids,
             sensor_locations,
             dict(zip(sensor_ids, sensor_timestamps)),
