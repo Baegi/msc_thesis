@@ -1,3 +1,5 @@
+from functools import cache
+import itertools
 import util
 from tqdm.notebook import tqdm
 from dataclasses import dataclass
@@ -5,8 +7,9 @@ import numpy as np
 import statistics
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
-from collections import deque
+from collections import defaultdict, deque
 import random
+import traceback
 
 M = np.diag([1, 1, 1, -1])
 
@@ -16,7 +19,7 @@ class Vertexer:
     nodes: np.ndarray
 
     # Defaults
-    v = 299792458
+    v = np.longdouble(299792458)
 
     def __post_init__(self):
         # Calculate valid input range
@@ -48,13 +51,21 @@ class Vertexer:
 
         return error
 
-    def find(self, times):
+    def find(self, times, debug=False):
         def lorentzInner(v, w):
             # Return Lorentzian Inner-Product
             return np.sum(v * (w @ M), axis = -1)
 
+        if debug:
+            print("self.nodes")
+            print(self.nodes)
+            print("times")
+            print(times)
+
         A = np.append(self.nodes, times * self.v, axis = 1)
-        #print(A)
+        if debug:
+            print("A:")
+            print(A)
         At = np.transpose(A)
         #print("At")
         #print(At)
@@ -105,11 +116,13 @@ class Vertexer:
 
 
 
-def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas):
+def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debug=False):
     assert len(sensor_ids) >= 4
 
+    if debug:
+        print("N Sensors:", len(sensor_ids))
+
     # select sensor subset for mlat
-    # for now, just check which ones have a time_delta relation to the first sensor
     relevant_sensors = list()
     for sensor_id in sensor_ids:
         if not len(relevant_sensors):
@@ -119,8 +132,38 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas):
         if td_base_sensor in time_deltas and sensor_id in time_deltas[td_base_sensor]:
             relevant_sensors.append(sensor_id)
 
+    if debug:
+        print("Initial sensor subset:", relevant_sensors)
+
     if len(relevant_sensors) < 4:
+        if debug:
+            print("Not enough initally connected sensors")
         return
+
+    while len(relevant_sensors) > 4:
+        # find worst of the relevant sensors and potentially exclude it
+        variance_sums = defaultdict(float)
+        variance_n = defaultdict(int)
+        for i, j in itertools.combinations(relevant_sensors, 2):
+            if i in time_deltas and j in time_deltas[i]:
+                v = time_deltas[i][j][1]
+                variance_sums[i] += v
+                variance_sums[j] += v
+                variance_n[i] += 1
+                variance_n[j] += 1
+
+        for i in variance_sums:
+            if variance_n[i] > 0:
+                variance_sums[i] /= variance_n[i]
+        sorted_var_sums = sorted(variance_sums.items(), key=lambda e: e[1], reverse=True)
+        if sorted_var_sums[0][1] > 2* statistics.median(variance_sums.values()):
+            relevant_sensors.remove(sorted_var_sums[0][0])
+        else:
+            break
+        
+    if debug:
+        print("Using", len(relevant_sensors), "/", len(sensor_ids), "sensors for MLAT")
+        print(relevant_sensors)
 
 
     # prepare locations (gather around 0,0,0 for more accurate calculations)
@@ -132,8 +175,14 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas):
             ecef_min_coordinates[i] = min(ecef_min_coordinates[i], l[i])
             ecef_max_coordinates[i] = max(ecef_max_coordinates[i], l[i])
 
-    center_point = np.add(ecef_min_coordinates, ecef_max_coordinates) / 2
-    locations = [np.subtract(sensor_locations[e].pos(), center_point) for e in relevant_sensors]
+    center_point = np.add(ecef_min_coordinates, ecef_max_coordinates, dtype=np.longdouble) / 2
+    # debug
+    #center_point = np.zeros(3)
+    locations = [np.subtract(sensor_locations[e].pos(), center_point, dtype=np.longdouble) for e in relevant_sensors]
+
+    if debug:
+        print("sensors center point:", center_point)
+        print("centered sensor locations:", locations)
 
     # prepare timestamps
     timestamps = [0] # zero represents td_base
@@ -143,17 +192,30 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas):
             - sensor_timestamps[td_base_sensor]
         )
     
+    if debug:
+        print("corrected timestamps:", timestamps)
 
 
-    myVertexer = Vertexer(np.array(locations))
+    myVertexer = Vertexer(np.array(locations, dtype=np.longdouble))
     try:
+        calculated_location = myVertexer.find(np.array(timestamps, dtype=np.longdouble), debug=debug)
+
+        if debug:
+            print("Uncorrected calc location:", calculated_location)
+
         target_location = np.add(
-            myVertexer.find(np.array([[e] for e in timestamps])),
+            calculated_location,
             center_point
         )
+        if debug:
+            print("Corrected location:", target_location)
+            print("difference:", np.subtract(target_location, calculated_location))
+        
         return util.GeoPoint('ecef', *target_location)
     except:
-        #print("Fail")
+        if debug:
+            print("Fail")
+            traceback.print_exc()
         pass
 
 
@@ -210,15 +272,17 @@ def calc_positions(variance_cutoff=1e-6):
     util.conn.commit()
 
 
-def summarize_accuracy():
+def summarize_accuracy(stage):
+    assert stage in ['raw', 'corrected']
+    
     util.conn.commit()
     util.cur.execute('''SELECT COUNT(*) FROM messages''')
     print("Number of received messages:", util.cur.fetchone())
 
-    util.cur.execute('''SELECT COUNT(*) FROM msg_positions_raw''')
+    util.cur.execute(f'''SELECT COUNT(*) FROM msg_positions_{stage}''')
     print("Number of calculated positions:", util.cur.fetchone())
 
-    util.cur.execute('''
+    util.cur.execute(f'''
         SELECT |/(
             (msg.ecef_x - msg_pos.ecef_x)^2 +
             (msg.ecef_y - msg_pos.ecef_y)^2 +
@@ -226,7 +290,7 @@ def summarize_accuracy():
         ) AS dist
 
         FROM messages msg
-        JOIN msg_positions_raw msg_pos
+        JOIN msg_positions_{stage} msg_pos
         ON msg.id = msg_pos.msg_id
     ''')
 
@@ -280,14 +344,14 @@ def post_process_positions():
         GROUP BY messages.icao
     ''')
 
-    WINDOW_SIZE = 20
-    OUTLIER_DISTANCE_CUTOFF = 200000 # 20km
+    OUTLIER_DISTANCE_CUTOFF = 20000 # 20km
     for messages in tqdm(util.cur.fetchall()):
         # all messages in a path
         messages = list(sorted([list(eval(e)) for e in eval(messages[0])]))
         points = [util.GeoPoint('ecef', *e[1:]) for e in messages]
 
         bad_msgs = set()
+        WINDOW_SIZE = 20
         # first, remove outliers
         for i in range(len(points)):
             # sliding window shenanigans
@@ -298,12 +362,34 @@ def post_process_positions():
                     break
             else:
                 bad_msgs.add(messages[i][0])
-
-        util.cur.executemany('''INSERT INTO msg_positions_corrected VALUES(
-            %s, %s, %s, %s
-        )''', ([e for e in messages if e[0] not in bad_msgs]))
         
         print("Removed", len(bad_msgs), "/", len(messages), "positions")
 
+        messages = [e for e in messages if e[0] not in bad_msgs]
+        points = [util.GeoPoint('ecef', *e[1:]) for e in messages]
 
-        
+        # now, smooth the path
+        WINDOW_SIZE = 10
+        smoothed_points = list()
+        for i in range(len(points)):
+            # sliding window shenanigans
+            sum_weights = 0
+            super_point = np.array([0.0, 0.0, 0.0])
+            for j in range(max(0, i-WINDOW_SIZE//2), min(len(points), i + (WINDOW_SIZE+1)//2)):
+                # weights can be changed
+                dist = abs(i-j) + 1
+                weight = 1/dist
+                weight = 1
+                sum_weights += weight
+                super_point += np.array(points[j].pos()) * weight
+            
+            super_point /= sum_weights
+            smoothed_points.append(super_point)
+
+        assert len(smoothed_points) == len(points)
+
+        util.cur.executemany('''INSERT INTO msg_positions_corrected VALUES(
+            %s, %s, %s, %s
+        )''', ([(messages[i][0], *smoothed_points[i]) for i in range(len(messages))]))
+
+    util.conn.commit()

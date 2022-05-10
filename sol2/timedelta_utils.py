@@ -1,10 +1,13 @@
 from cmath import isnan
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import itertools
 import threading
 import util
 import psycopg2
 import statistics
 from tqdm.notebook import tqdm
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 
 N_THREADS = 32
 C = 299792458 # light speed, meters per second
@@ -44,7 +47,12 @@ def calc_td_slice(sensor_id):
             time_deltas.append(td)
 
         td_mean = statistics.mean(time_deltas)
-        td_var = statistics.variance(time_deltas, xbar=td_mean)
+
+        # remove outliers
+        time_deltas_corrected = [e for e in time_deltas if abs(e - td_mean) <= 10]
+
+        td_mean = statistics.mean(time_deltas_corrected)
+        td_var = statistics.variance(time_deltas_corrected, xbar=td_mean)
         #print(sensor_id, s2_id, td_mean, td_var, len(time_deltas))
 
         cur.execute('''
@@ -139,3 +147,42 @@ def propagate_timedeltas():
         ''', (sensor_ids[i],))
 
     util.conn.commit()
+
+
+def timedelta_statistics():
+    util.cur.execute('SELECT COUNT(*) FROM sensors')
+    n_sensors = util.cur.fetchone()[0]
+
+    util.cur.execute('''
+        SELECT sensor_a, sensor_b, mean, variance FROM time_deltas
+    ''')
+    time_deltas = util.cur.fetchall()
+    _, _, means, variances = zip(*time_deltas)
+
+    print("n sensors:", n_sensors)
+    print("connected sensor pairs:", len(time_deltas), '/', n_sensors * (n_sensors-1), "(" + str(100*len(time_deltas)//(n_sensors*(n_sensors-1))) + "%)")
+    print("Mean mean:", statistics.mean(means))
+    print("Mean variance:", statistics.mean(variances))
+    print("Max variance:", max(variances), "sensors:", next(e for e in time_deltas if e[3] == max(variances)))
+
+    util.cur.execute('''
+        SELECT r1.sensor_timestamp, r2.sensor_timestamp, r1.server_timestamp, r2.server_timestamp
+        FROM records r1
+        JOIN records r2 ON r1.msg_id = r2.msg_id
+        WHERE r1.sensor_id = %s AND r2.sensor_id = %s
+    ''', (next(e[:2] for e in time_deltas if e[3] == max(variances))))
+    s1_timestamps, s2_timestamps, s1_server_t, s2_server_t = zip(*util.cur.fetchall())
+    #s1_timestamps = [e - s1_timestamps[0] for e in s1_timestamps]
+    #s2_timestamps = [e - s2_timestamps[0] for e in s2_timestamps]
+
+    print(len(s1_timestamps), len(s2_timestamps))
+    max_i = max([(abs(s1_timestamps[i] - s2_timestamps[i]), i) for i in range(len(s1_timestamps))])[1]
+    print("max_i", max_i)
+    print(s1_timestamps[max_i], s1_server_t[max_i])
+    print(s2_timestamps[max_i], s2_server_t[max_i])
+    print(max([(abs(s1_timestamps[i] - s2_timestamps[i]), i) for i in range(len(s1_timestamps))]))
+    fig = plt.figure()
+    plt.scatter(
+        s1_timestamps,
+        [s1_timestamps[i] - s2_timestamps[i] for i in range(len(s1_timestamps))]
+    )

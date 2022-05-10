@@ -57,30 +57,31 @@ def close_db():
     del conn
 
 def init_db():
+    conn.commit()
     cur.execute('''CREATE TABLE IF NOT EXISTS messages (
         id serial,
         msg char(28) NOT NULL UNIQUE,
         icao char(6) NOT NULL,
-        ecef_x double precision,
-        ecef_y double precision,
-        ecef_z double precision,
+        ecef_x double precision NOT NULL,
+        ecef_y double precision NOT NULL,
+        ecef_z double precision NOT NULL,
         relevant boolean NOT NULL,
         PRIMARY KEY (id)
     );''')
     cur.execute('''CREATE TABLE IF NOT EXISTS sensors (
         id serial,
-        type varchar(9),
-        ecef_x double precision,
-        ecef_y double precision,
-        ecef_z double precision,
+        type varchar(9) NOT NULL,
+        ecef_x double precision NOT NULL,
+        ecef_y double precision NOT NULL,
+        ecef_z double precision NOT NULL,
         PRIMARY KEY (id),
         UNIQUE (type, ecef_x, ecef_y, ecef_z)
     );''')
     cur.execute('''CREATE TABLE IF NOT EXISTS records (
         msg_id integer,
         sensor_id integer,
-        sensor_timestamp double precision,
-        server_timestamp double precision,
+        sensor_timestamp double precision NOT NULL,
+        server_timestamp double precision NOT NULL,
         PRIMARY KEY (msg_id, sensor_id),
         FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE,
         FOREIGN KEY (sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
@@ -88,8 +89,8 @@ def init_db():
     cur.execute('''CREATE TABLE IF NOT EXISTS time_deltas (
         sensor_a integer,
         sensor_b integer,
-        mean double precision,
-        variance double precision,
+        mean double precision NOT NULL,
+        variance double precision NOT NULL,
         num integer,
         PRIMARY KEY (sensor_a, sensor_b),
         FOREIGN KEY (sensor_a) REFERENCES sensors(id) ON DELETE CASCADE,
@@ -99,17 +100,17 @@ def init_db():
 
     cur.execute('''CREATE TABLE IF NOT EXISTS msg_positions_raw (
         msg_id integer PRIMARY KEY,
-        ecef_x double precision,
-        ecef_y double precision,
-        ecef_z double precision,
+        ecef_x double precision NOT NULL,
+        ecef_y double precision NOT NULL,
+        ecef_z double precision NOT NULL,
         FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE
     );''')
 
     cur.execute('''CREATE TABLE IF NOT EXISTS msg_positions_corrected (
         msg_id integer PRIMARY KEY,
-        ecef_x double precision,
-        ecef_y double precision,
-        ecef_z double precision,
+        ecef_x double precision NOT NULL,
+        ecef_y double precision NOT NULL,
+        ecef_z double precision NOT NULL,
         FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE
     );''')
 
@@ -135,7 +136,7 @@ def convert_timestamp(sensor_type, time_at_sensor, timestamp):
         assert 0 <= timestamp < 1e9
         return time_at_sensor + timestamp / 1e9
     else:
-        raise ValueError()
+        raise ValueError("Unknown sensor type: " + sensor_type)
 
 
 last_loc_msg = defaultdict(lambda: [None, None])
@@ -195,12 +196,16 @@ def read_data(dir):
                     discarded["irrelevant"] += 1
                     continue
 
-                if sensorType in ['SBS-3', 'OpenSky', 'dump1090']:
-                    discarded['bad_sensortype'] += 1
+                if sensorType != "Radarcape":
+                    discarded['not_radarcape'] += 1
                     continue
-                elif sensorType not in ['dump1090', 'Radarcape']:
-                    discarded[f'unknown_sensortype_{sensorType}'] += 1
-                    continue
+
+                #if sensorType in ['SBS-3', 'OpenSky', 'dump1090']:
+                #    discarded['bad_sensortype'] += 1
+                #    continue
+                #elif sensorType not in ['dump1090']:
+                #    discarded[f'unknown_sensortype_{sensorType}'] += 1
+                #    continue
 
                 if 'null' in [sensorLatitude, sensorLongitude, sensorAltitude, timeAtSensor, timestamp]:
                     discarded["null_values"] += 1
@@ -239,6 +244,10 @@ def read_data(dir):
                         discarded["no_icao"] += 1
                         continue
                     icao = icao.upper()
+
+                    if x is None:
+                        discarded["no_msg_loc_info"] += 1
+                        continue
 
                     # store msg in DB
                     cur.execute("""
@@ -282,6 +291,31 @@ def read_data(dir):
                 
         conn.commit()
         
+
+def visualize_timedrift():
+    cur.execute('''
+        SELECT sensor_id, ARRAY_AGG(sensor_timestamp), ARRAY_AGG(server_timestamp)
+        FROM records
+        WHERE sensor_id = 481
+        GROUP BY sensor_id
+        ORDER BY RANDOM()
+        LIMIT 5
+    ''')
+    rows = cur.fetchall()
+    
+    for r in rows:
+        sensor_id, sensor_timestamps, server_timestamps = r
+        print(len(sensor_timestamps), len(server_timestamps))
+        sensor_timestamps = [e - sensor_timestamps[0] for e in sensor_timestamps]
+        server_timestamps = [e - server_timestamps[0] for e in server_timestamps]
+        difference = [sensor_timestamps[i] - server_timestamps[i] for i in range(len(sensor_timestamps))]
+        #fig = plt.scatter(server_timestamps, sensor_timestamps, )
+        fig = plt.figure()
+        plt.axes().scatter(range(len(difference)), difference)
+        plt.title(str(sensor_id))
+        
+    
+
 
 def cleanup_sensors(variance_cutoff=10):
     # remove sensors with high (sensor_timestamp - server_timestamp) variances
