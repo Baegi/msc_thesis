@@ -13,15 +13,19 @@ N_THREADS = 32
 C = 299792458 # light speed, meters per second
 sensor_locations = dict()
 
-def calc_td_slice(sensor_id):
-    thread_name = threading.current_thread().getName()
-    conn = worker_connections[thread_name]
+def calc_td_slice(sensor_id, use_default_conn=False):
+    if use_default_conn:
+        conn = util.conn
+    else:
+        thread_name = threading.current_thread().getName()
+        conn = worker_connections[thread_name]
+
     cur = conn.cursor()
 
     s1_loc = sensor_locations[sensor_id]
 
     cur.execute('''
-        SELECT R2.sensor_id, ARRAY_AGG(r1.sensor_timestamp), ARRAY_AGG(r2.sensor_timestamp), 
+        SELECT r2.sensor_id, ARRAY_AGG(r1.sensor_timestamp), ARRAY_AGG(r2.sensor_timestamp), 
             ARRAY_AGG(messages.ecef_x), ARRAY_AGG(messages.ecef_y), ARRAY_AGG(messages.ecef_z) 
         FROM records AS r1
         INNER JOIN records AS r2 ON r1.msg_id = r2.msg_id
@@ -46,13 +50,18 @@ def calc_td_slice(sensor_id):
             td = (t1 - t_msg_t1) - (t2 - t_msg_t2)
             time_deltas.append(td)
 
+        for i in range(3):
+            td_mean = statistics.mean(time_deltas)
+            # remove outliers
+            time_deltas = [e for e in time_deltas if abs(e - td_mean) <= 10**-i]
+            if len(time_deltas) < 2:
+                break
+
+        if len(time_deltas) < 2:
+            continue
+
         td_mean = statistics.mean(time_deltas)
-
-        # remove outliers
-        time_deltas_corrected = [e for e in time_deltas if abs(e - td_mean) <= 10]
-
-        td_mean = statistics.mean(time_deltas_corrected)
-        td_var = statistics.variance(time_deltas_corrected, xbar=td_mean)
+        td_var = statistics.variance(time_deltas, xbar=td_mean)
         #print(sensor_id, s2_id, td_mean, td_var, len(time_deltas))
 
         cur.execute('''
@@ -72,7 +81,6 @@ def init_worker():
 def calc_timedeltas():
     
     # get sensors
-    util.connect_db()
     util.cur.execute('SELECT id, ecef_x, ecef_y, ecef_z FROM sensors')
     for id, x, y, z in util.cur.fetchall():
         sensor_locations[id] = util.GeoPoint('ecef', x, y, z)
@@ -81,18 +89,18 @@ def calc_timedeltas():
     util.conn.commit()
 
 
-    with ThreadPoolExecutor(initializer=init_worker) as executor:
-        pbar = tqdm(total=len(sensor_locations))
-        for _ in executor.map(calc_td_slice, sensor_locations.keys()):
-            pbar.update(1)
-    #init_worker()
-    #for sensor_id in tqdm(sensor_locations.keys()):
-    #    calc_td_slice(sensor_id)
-    #    #break
+    #with ThreadPoolExecutor(initializer=init_worker) as executor:
+    #    pbar = tqdm(total=len(sensor_locations))
+    #    for _ in executor.map(calc_td_slice, sensor_locations.keys()):
+    #        pbar.update(1)
+
+    for sensor_id in tqdm(sensor_locations.keys()):
+        calc_td_slice(sensor_id, use_default_conn=True)
+        #break
 
     # close DB connections
     for conn in worker_connections.values():
-        conn.cursor().close()
+        #conn.cursor().close()
         conn.close()
     
     #threads = list()
@@ -186,3 +194,6 @@ def timedelta_statistics():
         s1_timestamps,
         [s1_timestamps[i] - s2_timestamps[i] for i in range(len(s1_timestamps))]
     )
+
+    # check accuracy using known positions
+    

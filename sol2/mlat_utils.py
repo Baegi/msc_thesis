@@ -109,7 +109,7 @@ class Vertexer:
             if any(np.iscomplex([X, Y, Z, T])):
                 continue
             solution.append(np.array([X,Y,Z]))
-            #print("Candidate:", X, Y, Z, math.sqrt(X**2 + Y**2 + Z**2))
+            #print("Candidate:", X, Y, Z, (X**2 + Y**2 + Z**2)**.5)
 
         if not len(solution):
             return
@@ -177,30 +177,37 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debu
             ecef_min_coordinates[i] = min(ecef_min_coordinates[i], l[i])
             ecef_max_coordinates[i] = max(ecef_max_coordinates[i], l[i])
 
-    center_point = np.add(ecef_min_coordinates, ecef_max_coordinates, dtype=np.longdouble) / 2
+    center_point = np.add(ecef_min_coordinates, ecef_max_coordinates) / 2
     # debug
     #center_point = np.zeros(3)
-    locations = [np.subtract(sensor_locations[e].pos(), center_point, dtype=np.longdouble) for e in relevant_sensors]
+    locations = [np.subtract(sensor_locations[e].pos(), center_point) for e in relevant_sensors]
 
     if debug:
         print("sensors center point:", center_point)
         print("centered sensor locations:", locations)
 
     # prepare timestamps
-    timestamps = [0] # zero represents td_base
+    #timestamps = [0] # zero represents td_base
+    #for sensor_id in relevant_sensors[1:]:
+    #    timestamps.append(
+    #        sensor_timestamps[sensor_id] + time_deltas[td_base_sensor][sensor_id][0]
+    #        - sensor_timestamps[td_base_sensor]
+    #    )
+    timestamps = [10] # zero represents td_base
     for sensor_id in relevant_sensors[1:]:
         timestamps.append(
             sensor_timestamps[sensor_id] + time_deltas[td_base_sensor][sensor_id][0]
-            - sensor_timestamps[td_base_sensor]
+            - sensor_timestamps[td_base_sensor] + 10
         )
+
     
     if debug:
         print("corrected timestamps:", timestamps)
 
 
-    myVertexer = Vertexer(np.array(locations, dtype=np.longdouble))
+    myVertexer = Vertexer(np.array(locations))
     try:
-        calculated_location = myVertexer.find(np.array(timestamps, dtype=np.longdouble), debug=debug)
+        calculated_location = myVertexer.find(np.array(timestamps), debug=debug)
 
         if debug:
             print("Uncorrected calc location:", calculated_location)
@@ -352,7 +359,7 @@ def calc_mlat_sympy(sensor_ids, sensor_locations, sensor_timestamps, time_deltas
 
 
 
-def calc_positions(variance_cutoff=1e-6):
+def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
 
     util.cur.execute('SELECT id, ecef_x, ecef_y, ecef_z FROM sensors')
     sensor_locations = {e[0]: util.GeoPoint('ecef', *e[1:]) for e in util.cur.fetchall()}
@@ -380,19 +387,21 @@ def calc_positions(variance_cutoff=1e-6):
     it = 0
     for msg_id, sensor_ids, sensor_timestamps in tqdm(util.cur.fetchall()):
         it += 1
-        if it > 100 and True:
+        if limit > 0 and it > limit:
             break
 
         assert len(sensor_timestamps) == len(sensor_ids)
         
         #print(msg_id, sensor_ids, sensor_timestamps)
-        pos = calc_mlat_sympy(
+        calc_mlat_func = calc_mlat_sympy if use_sympy else calc_mlat
+        pos = calc_mlat_func(
             sensor_ids,
             sensor_locations,
             dict(zip(sensor_ids, sensor_timestamps)),
             #{sensor_ids[i]: sensor_timestamps[i] for i in range(len(sensor_ids))},
             time_deltas
         )
+
         if pos is None:
             #print(":(")
             continue
