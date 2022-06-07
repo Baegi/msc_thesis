@@ -44,30 +44,37 @@ def calc_td_slice(sensor_id, use_default_conn=False):
 
         for t1, t2, msg_x, msg_y, msg_z in zip(s1_timestamps, s2_timestamps, msg_xs, msg_ys, msg_zs):
             msg_loc = util.GeoPoint('ecef', msg_x, msg_y, msg_z)
-            t_msg_t1 = msg_loc.dist(s1_loc) / C
-            t_msg_t2 = msg_loc.dist(s2_loc) / C
+            d_msg_t1 = msg_loc.dist(s1_loc)
+            d_msg_t2 = msg_loc.dist(s2_loc)
+            theoretical_td = (d_msg_t1 - d_msg_t2) / C
 
-            td = (t1 - t_msg_t1) - (t2 - t_msg_t2)
+            td = (t1 - t2) - theoretical_td
             time_deltas.append(td)
 
-        for i in range(3):
-            td_mean = statistics.mean(time_deltas)
-            # remove outliers
-            time_deltas = [e for e in time_deltas if abs(e - td_mean) <= 10**-i]
-            if len(time_deltas) < 2:
-                break
+        #for i in range(3):
+        #    td_mean = statistics.median(time_deltas)
+        #    # remove outliers
+        #    time_deltas = [e for e in time_deltas if abs(e - td_mean) <= 10**-i]
+        #    if len(time_deltas) < 2:
+        #        break
+
+        # remove top and bottom 10%
+        time_deltas = sorted(time_deltas)[int(len(time_deltas) / 10) : int(len(time_deltas) * 9 / 10)]
+
+
 
         if len(time_deltas) < 2:
             continue
 
         td_mean = statistics.mean(time_deltas)
         td_var = statistics.variance(time_deltas, xbar=td_mean)
+        td_median = statistics.median(time_deltas)
         #print(sensor_id, s2_id, td_mean, td_var, len(time_deltas))
 
         cur.execute('''
             INSERT INTO time_deltas (sensor_a, sensor_b, mean, variance, num)
             VALUES (%s, %s, %s, %s, %s)
-        ''', (sensor_id, s2_id, td_mean, td_var, len(time_deltas)))
+        ''', (sensor_id, s2_id, td_median, td_var, len(time_deltas)))
 
     conn.commit()
     return
@@ -197,3 +204,5 @@ def timedelta_statistics():
 
     # check accuracy using known positions
     
+    for i, j in itertools.combinations(time_deltas, 2):
+        pass
