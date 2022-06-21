@@ -22,6 +22,11 @@ class GeoPoint:
         pyproj.crs.CRS(proj='geocent', ellps='WGS84', datum='WGS84').to_3d()
     )
 
+    rev_transformer = pyproj.Transformer.from_crs(
+        pyproj.crs.CRS(proj='geocent', ellps='WGS84', datum='WGS84').to_3d(),
+        pyproj.crs.CRS(proj='latlong', ellps='WGS84', datum='WGS84').to_3d()
+    )
+
     def __init__(self, format, a, b, c) -> None:
         assert format in ["wgs84", "ecef"]
         if format == "ecef":
@@ -31,7 +36,8 @@ class GeoPoint:
         else:
             assert -90 <= a <= 90
             assert -180 <= b <= 180
-            self.x, self.y, self.z = GeoPoint.transformer.transform(a, b, c)
+            # careful! pyproj wants lon/lat/alt, not lat/lon/alt!
+            self.x, self.y, self.z = GeoPoint.transformer.transform(b, a, c)
 
 
     def dist(self, other):
@@ -39,6 +45,11 @@ class GeoPoint:
 
     def pos(self):
         return self.x, self.y, self.z
+
+    def to_lla(self):
+        # careful! pyproj returns lon/lat/alt, not lat/lon/alt!
+        lon, lat, alt = GeoPoint.rev_transformer.transform(self.x, self.y, self.z)
+        return lat, lon, alt
 
     def __str__(self) -> str:
         return('ecef: ' + str(self.pos()))
@@ -91,8 +102,8 @@ def init_db():
     cur.execute('''CREATE TABLE IF NOT EXISTS records (
         msg_id integer,
         sensor_id integer,
-        sensor_timestamp double precision NOT NULL,
-        server_timestamp double precision NOT NULL,
+        sensor_timestamp bigint NOT NULL,
+        server_timestamp bigint NOT NULL,
         PRIMARY KEY (msg_id, sensor_id),
         FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE,
         FOREIGN KEY (sensor_id) REFERENCES sensors(id) ON DELETE CASCADE
@@ -100,8 +111,8 @@ def init_db():
     cur.execute('''CREATE TABLE IF NOT EXISTS time_deltas (
         sensor_a integer,
         sensor_b integer,
-        mean double precision NOT NULL,
-        variance double precision NOT NULL,
+        mean bigint NOT NULL,
+        variance bigint NOT NULL,
         num integer,
         PRIMARY KEY (sensor_a, sensor_b),
         FOREIGN KEY (sensor_a) REFERENCES sensors(id) ON DELETE CASCADE,
@@ -142,10 +153,10 @@ def is_relevant(msg):
 def convert_timestamp(sensor_type, time_at_sensor, timestamp):
     if sensor_type == 'dump1090':
         assert 0 <= timestamp / 12e6 < 89.47848533333335
-        return time_at_sensor * 89.47848533333334 + timestamp / 12e6 # 2**30 / 12e6
+        return (time_at_sensor * 89.47848533333334 + timestamp / 12e6) * 1e9 # 2**30 / 12e6
     elif sensor_type == 'Radarcape':
         assert 0 <= timestamp < 1e9
-        return time_at_sensor + timestamp / 1e9
+        return time_at_sensor * 1e9 + timestamp
     else:
         raise ValueError("Unknown sensor type: " + sensor_type)
 
@@ -180,7 +191,7 @@ def get_announced_pos(msg, timestamp):
 
 
 def read_data(dir, format='raw'):
-    assert format in ['raw', 'LocaRDS', 'AIcrowd']
+    assert format in ['raw', 'LocaRDS', 'AIcrowd_train', 'AIcrowd_comp']
 
     print("Deleting old data")
     cur.execute('DELETE FROM sensors')
@@ -317,22 +328,26 @@ def read_data(dir, format='raw'):
                 'records_file': 'set_{}.csv',
                 'sensors_file': 'set_{}_sensors.csv'
             },
-            'AIcrowd': {
+            'AIcrowd_train': {
                 'subdir': 'training_{}_category_1',
                 'records_file': 'training_{}_category_1.csv',
+                'sensors_file': 'sensors.csv'
+            },
+            'AIcrowd_comp': {
+                'subdir': '.',
+                'records_file': 'round1_competition.csv',
                 'sensors_file': 'sensors.csv'
             }
         }[format]
         # Read LocaRDS data
         sensors = dict()
         sensor_mapping = dict()
-        for folder in tqdm(os.listdir(dir)):
+        for it, folder in tqdm(enumerate(os.listdir(dir))):
             print(folder)
 
             messages = list()
             records = list()
-            it = int(folder[-1])
-            if it == 1:
+            if it == 0:
                 # read sensors in first iteration
                 print("Reading sensors")
                 with open(os.path.join(dir, folder, naming_format['sensors_file'].format(1)), 'r') as f:
@@ -342,8 +357,8 @@ def read_data(dir, format='raw'):
                         serial, latitude, longitude, height, type = line.strip().split(',', 4)
                         #if good == 'FALSE':
                         #    continue
-                        if type != 'Radarcape':
-                            continue
+                        #if type != 'Radarcape':
+                        #    continue
                         if len(type) > 9:
                             # dump1090-hptoa
                             print(type)
@@ -357,7 +372,7 @@ def read_data(dir, format='raw'):
                         if key not in sensors:
                             sensors[key] = int(serial)
                         sensor_mapping[int(serial)] = sensors[key]
-                    print("Writing sensors to DB")
+                    print("Writing", len(sensors), "sensors to DB")
                     psycopg2.extras.execute_batch(cur, '''INSERT INTO sensors (id, type, ecef_x, ecef_y, ecef_z)
                         VALUES (%s, %s, %s, %s, %s)
                     ''', [(e[1], *e[0]) for e in sensors.items()])
@@ -367,15 +382,14 @@ def read_data(dir, format='raw'):
             # read set_i
             with open(os.path.join(dir, folder, naming_format['records_file'].format(it)), 'r') as f:
                 line = f.readline()
-                assert line == (
-                    'id,timeAtServer,aircraft,latitude,longitude,baroAltitude,geoAltitude,numMeasurements,measurements\n'
-                    if format == 'LocaRDS' else
+                assert line in (
+                    'id,timeAtServer,aircraft,latitude,longitude,baroAltitude,geoAltitude,numMeasurements,measurements\n',
                     '"id","timeAtServer","aircraft","latitude","longitude","baroAltitude","geoAltitude","numMeasurements","measurements"\n'
                 )
                 while (line := f.readline()):
                     (id, timeAtServer, aircraft, latitude, longitude, baroAltitude, geoAltitude,
                         numMeasurements, measurements) = line.strip().split(',', 8)
-                    if not len(latitude):
+                    if not len(latitude) or latitude == 'NaN':
                         continue
                     if not (-90 <= float(latitude) <= 90 and
                         -180 <= float(longitude) <= 180):
@@ -394,16 +408,17 @@ def read_data(dir, format='raw'):
                     for entry in eval(measurements[1:-1]):
                         sensor_id, timeAtSensor, rssi = entry
                         if sensor_id not in sensor_mapping:
+                            print("sensor id", sensor_id, "has no mapping")
                             continue
                         records.append((
                             int(id),
                             sensor_mapping[int(sensor_id)],
-                            float(timeAtSensor) / 1e9,
-                            float(timeAtServer)
+                            int(timeAtSensor),
+                            float(timeAtServer) * 1e9
                         ))
 
-                    if len(records) > 1e7:
-                        break
+                    #if len(records) > 1e7:
+                    #    break
 
             print("Writing", len(messages), "messages to DB")
             psycopg2.extras.execute_batch(cur, '''INSERT INTO messages (id, msg, icao, ecef_x, ecef_y, ecef_z, relevant)
@@ -492,7 +507,7 @@ def visualize_flightpaths(icao=None):
     plt.title(icao)
 
 
-def cleanup_sensors(variance_cutoff=10):
+def cleanup_sensors(variance_cutoff=1e16):
     print("Cleaning up sensors")
     # remove sensors with high (sensor_timestamp - server_timestamp) variances
     cur.execute('''
@@ -513,9 +528,9 @@ def cleanup_sensors(variance_cutoff=10):
     conn.commit()
 
     # remove sensors of non-radarcape types
-    cur.execute('''
-        DELETE FROM sensors WHERE type != 'Radarcape'
-    ''')
+    #cur.execute('''
+    #    DELETE FROM sensors WHERE type != 'Radarcape'
+    #''')
 
     # remove sensors with only one record
     cur.execute('''
@@ -551,6 +566,35 @@ def cleanup_messages():
         OR ecef_y = '+infinity'
         OR ecef_z = '+infinity'
     ''')
+
+
+def cleanup_records(outlier_cutoff = 1e8):
+    cur.execute('''SELECT sensor_id, ARRAY_AGG(msg_id),
+        ARRAY_AGG(sensor_timestamp), ARRAY_AGG(server_timestamp)
+        FROM records
+        GROUP BY sensor_id
+    ''')
+
+    bad_records = list()
+
+    for row in tqdm(list(cur.fetchall())):
+        s_id = row[0]
+        entries = list(zip(*row[1:]))
+        timestamp_diffs = list()
+        for e in entries:
+            timestamp_diffs.append(e[1] - e[2]) # diff sensor_timstamp, server_timestamp
+        med_diff = statistics.median(timestamp_diffs)
+        bad_records.extend([
+            (e[0], s_id) for e in entries
+            if abs((e[1] - e[2]) - med_diff) > outlier_cutoff
+        ])
+
+    print("Removing", len(bad_records), "records...")
+    cur.executemany('''DELETE FROM records
+        WHERE msg_id = %s AND sensor_id = %s
+    ''', bad_records)
+
+    conn.commit()
 
 
 def cleanup_flightpaths(outlier_dist_cutoff=10000, variance_cutoff=0.3, more_plots=False):

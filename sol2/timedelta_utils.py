@@ -1,4 +1,5 @@
 from cmath import isnan
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import itertools
 import threading
@@ -10,7 +11,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 N_THREADS = 32
-C = 299792458 # light speed, meters per second
+C = .299792458 # light speed, meters per second
 sensor_locations = dict()
 
 def calc_td_slice(sensor_id, use_default_conn=False):
@@ -44,9 +45,9 @@ def calc_td_slice(sensor_id, use_default_conn=False):
 
         for t1, t2, msg_x, msg_y, msg_z in zip(s1_timestamps, s2_timestamps, msg_xs, msg_ys, msg_zs):
             msg_loc = util.GeoPoint('ecef', msg_x, msg_y, msg_z)
-            d_msg_t1 = msg_loc.dist(s1_loc)
-            d_msg_t2 = msg_loc.dist(s2_loc)
-            theoretical_td = (d_msg_t1 - d_msg_t2) / C
+            d_msg_s1 = msg_loc.dist(s1_loc)
+            d_msg_s2 = msg_loc.dist(s2_loc)
+            theoretical_td = (d_msg_s1 - d_msg_s2) / C
 
             td = (t1 - t2) - theoretical_td
             time_deltas.append(td)
@@ -85,6 +86,11 @@ def init_worker():
     thread_name = threading.current_thread().getName()
     worker_connections[thread_name] = psycopg2.connect("dbname=thesis user=postgres password=postgres")
 
+
+def calc_theoretical_timedelta(aircraft_pos, s1_pos, s2_pos):
+    return (aircraft_pos.dist(s1_pos) - aircraft_pos.dist(s2_pos)) / C
+
+
 def calc_timedeltas():
     
     # get sensors
@@ -120,6 +126,78 @@ def calc_timedeltas():
     #print("Waiting for threads to finish...")
     #for i in range(N_THREADS):
     #    threads[i].join()
+
+
+def calc_timedeltas2():
+    util.conn.commit()
+    util.cur.execute('DELETE FROM time_deltas')
+    # calculate theoretical time deltas
+    util.cur.execute('''
+        SELECT id, ecef_x, ecef_y, ecef_z FROM sensors
+    ''')
+    sensor_locations = {e[0]: util.GeoPoint('ecef', *e[1:]) for e in util.cur.fetchall()}
+
+    util.cur.execute('''
+    SELECT r1.sensor_id, r2.sensor_id,
+        ARRAY_AGG(r1.sensor_timestamp), ARRAY_AGG(r2.sensor_timestamp),
+        ARRAY_AGG(msg.ecef_x), ARRAY_AGG(ecef_y), ARRAY_AGG(ecef_z)
+    FROM records r1
+    JOIN records r2 ON r1.msg_id = r2.msg_id
+    JOIN messages msg ON msg.id = r1.msg_id
+    WHERE r1.sensor_id < r2.sensor_id
+    GROUP BY r1.sensor_id, r2.sensor_id
+    -- LIMIT 1
+    ''')
+    sensor_pairs = util.cur.fetchall()
+
+    time_deltas = list()
+    for row in tqdm(sensor_pairs):
+        # check if calculated td exists
+        s1_id, s2_id = row[:2]
+        
+        s1_pos = sensor_locations[s1_id]
+        s2_pos = sensor_locations[s2_id]
+
+        residuals = list()
+        for i in range(len(row[-1])):
+            msg_pos = util.GeoPoint('ecef', row[4][i], row[5][i], row[6][i])
+            s1_t, s2_t = row[2][i], row[3][i]
+
+            theoretical_td = calc_theoretical_timedelta(msg_pos, s1_pos, s2_pos)
+            residual_td = theoretical_td - (s1_t - s2_t)
+            residuals.append(residual_td)
+
+        med_resid = statistics.median(residuals)
+
+        # second run, limit error to 500ns, take median of remaining residuals
+        residuals = list()
+        for i in range(len(row[-1])):
+            msg_pos = util.GeoPoint('ecef', row[4][i], row[5][i], row[6][i])
+            s1_t, s2_t = row[2][i], row[3][i]
+
+            theoretical_td = calc_theoretical_timedelta(msg_pos, s1_pos, s2_pos)
+            residual_td = theoretical_td - (s1_t - s2_t)
+            
+            # here's the abort condition
+            if abs(residual_td - med_resid) > 500:
+                continue
+
+            residuals.append(residual_td)
+
+        med_resid = statistics.median(residuals)
+
+        med_error = statistics.median([
+            abs(e - med_resid) for e in residuals
+        ])
+
+        time_deltas.append((s1_id, s2_id, med_resid, med_error))
+
+    util.cur.executemany('''
+        INSERT INTO time_deltas (sensor_a, sensor_b, mean, variance)
+        VALUES (%s, %s, %s, %s) 
+    ''', time_deltas)
+    util.conn.commit()
+
 
 def propagate_timedeltas():
     
@@ -165,6 +243,7 @@ def propagate_timedeltas():
 
 
 def timedelta_statistics():
+    util.conn.commit()
     util.cur.execute('SELECT COUNT(*) FROM sensors')
     n_sensors = util.cur.fetchone()[0]
 
@@ -202,7 +281,104 @@ def timedelta_statistics():
         [s1_timestamps[i] - s2_timestamps[i] for i in range(len(s1_timestamps))]
     )
 
-    # check accuracy using known positions
+
+def analyze_td_error(delete_bad_sensors=False, variance_cutoff=1e8):
+    # calculate theoretical time deltas
+    util.cur.execute('''
+        SELECT id, ecef_x, ecef_y, ecef_z FROM sensors
+    ''')
+    sensor_locations = {e[0]: util.GeoPoint('ecef', *e[1:]) for e in util.cur.fetchall()}
+
+    util.cur.execute('''
+        SELECT sensor_a, ARRAY_AGG(sensor_b), ARRAY_AGG(mean)
+        FROM time_deltas
+        GROUP BY sensor_a
+    ''')
+    time_deltas = {
+        e[0]: dict(zip(e[1], e[2])) for e in util.cur.fetchall()
+    }
+
+    util.cur.execute('''
+    SELECT r1.sensor_id, r2.sensor_id,
+        ARRAY_AGG(r1.sensor_timestamp), ARRAY_AGG(r2.sensor_timestamp),
+        ARRAY_AGG(msg.ecef_x), ARRAY_AGG(ecef_y), ARRAY_AGG(ecef_z)
+    FROM records r1
+    JOIN records r2 ON r1.msg_id = r2.msg_id
+    JOIN messages msg ON msg.id = r1.msg_id
+    WHERE r1.sensor_id < r2.sensor_id
+    GROUP BY r1.sensor_id, r2.sensor_id
+    -- LIMIT 1
+    ''')
+    sensor_pairs = util.cur.fetchall()
+
     
-    for i, j in itertools.combinations(time_deltas, 2):
-        pass
+    all_errors = list()
+    sensor_td_variances = defaultdict(list)
+    for row in tqdm(sensor_pairs):
+        if len(row[-1]) < 2:
+            continue
+        # check if calculated td exists
+        s1_id, s2_id = row[:2]
+        
+        if s1_id not in time_deltas or s2_id not in time_deltas[s1_id]:
+            continue
+
+        s1_pos = sensor_locations[s1_id]
+        s2_pos = sensor_locations[s2_id]
+
+        td = time_deltas[s1_id][s2_id]
+        sensor_errors = list()
+        residuals = list()
+        for i in range(len(row[-1])):
+            msg_pos = util.GeoPoint('ecef', row[4][i], row[5][i], row[6][i])
+            s1_t, s2_t = row[2][i], row[3][i]
+
+            theoretical_td = calc_theoretical_timedelta(msg_pos, s1_pos, s2_pos)
+            residual_td = theoretical_td - (s1_t - s2_t)
+            residuals.append(residual_td)
+            sensor_errors.append(
+                td -
+                residual_td
+            )
+        all_errors.extend(sensor_errors)
+        sensor_td_variances[s1_id].append(statistics.variance(sensor_errors))
+        sensor_td_variances[s2_id].append(statistics.variance(sensor_errors))
+
+
+    def remove_outliers(items, q):
+        n = len(items)
+        return sorted(items)[int(n*q):int(n*(1-q))]
+
+    print("len/min/max errors:", len(all_errors), min(all_errors), max(all_errors))
+    all_errors = remove_outliers(all_errors, 0.05)
+    print("len/min/max errors:", len(all_errors), min(all_errors), max(all_errors))
+    #plt.figure()
+    #plt.hist(td_resid_diffs, bins=100)
+    plt.figure()
+    plt.title("All errors")
+    #plt.hist(remove_outliers(all_errors, 0), bins=100)
+    plt.hist([e for e in all_errors if abs(e) <= 1000], bins=100)
+
+    plt.figure()
+    plt.title("Median error per sensor")
+    plt.hist([statistics.median(e) for e in sensor_td_variances.values()], bins=100)
+
+
+    if delete_bad_sensors:
+        bad_sensors = list()
+        print("Deleting bad sensors...")
+        for s_id, variances in sensor_td_variances.items():
+            if statistics.median(variances) > variance_cutoff:
+                bad_sensors.append(s_id)
+                util.cur.execute('DELETE FROM sensors WHERE id = %s', (s_id,))
+
+        util.conn.commit()
+
+        print("deleted", len(bad_sensors), "sensors")
+        plt.figure()
+        plt.title("Median error per sensor")
+        plt.hist([statistics.median(e[1]) for e in sensor_td_variances.items() if e[0] not in bad_sensors], bins=100)
+
+            
+        
+

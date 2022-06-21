@@ -13,7 +13,7 @@ import traceback
 import sympy
 
 M = np.diag([1, 1, 1, -1])
-C = 299792458
+C = 0.299792458
 
 @dataclass
 class Vertexer:
@@ -21,7 +21,7 @@ class Vertexer:
     nodes: np.ndarray
 
     # Defaults
-    v = np.longdouble(299792458)
+    v = C
 
     def __post_init__(self):
         # Calculate valid input range
@@ -142,26 +142,31 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debu
             print("Not enough initally connected sensors")
         return
 
-    while len(relevant_sensors) > 4:
-        # find worst of the relevant sensors and potentially exclude it
-        variance_sums = defaultdict(float)
-        variance_n = defaultdict(int)
-        for i, j in itertools.combinations(relevant_sensors, 2):
-            if i in time_deltas and j in time_deltas[i]:
-                v = time_deltas[i][j][1]
-                variance_sums[i] += v
-                variance_sums[j] += v
-                variance_n[i] += 1
-                variance_n[j] += 1
 
-        for i in variance_sums:
-            if variance_n[i] > 0:
-                variance_sums[i] /= variance_n[i]
-        sorted_var_sums = sorted(variance_sums.items(), key=lambda e: e[1], reverse=True)
-        if sorted_var_sums[0][1] > 2* statistics.median(variance_sums.values()):
-            relevant_sensors.remove(sorted_var_sums[0][0])
-        else:
-            break
+    #while len(relevant_sensors) > 4:
+    #    # find worst of the relevant sensors and potentially exclude it
+    #    variance_sums = defaultdict(float)
+    #    variance_n = defaultdict(int)
+    #    for i, j in itertools.combinations(relevant_sensors, 2):
+    #        if i in time_deltas and j in time_deltas[i]:
+    #            v = time_deltas[i][j][1]
+    #            variance_sums[i] += v
+    #            variance_sums[j] += v
+    #            variance_n[i] += 1
+    #            variance_n[j] += 1
+    #
+    #    for i in variance_sums:
+    #        if variance_n[i] > 0:
+    #            variance_sums[i] /= variance_n[i]
+    #    sorted_var_sums = sorted(variance_sums.items(), key=lambda e: e[1], reverse=True)
+    #    if sorted_var_sums[0][1] > 2* statistics.median(variance_sums.values()):
+    #        relevant_sensors.remove(sorted_var_sums[0][0])
+    #    else:
+    #        break
+
+
+    # triangle area filtering
+
         
     if debug:
         print("Using", len(relevant_sensors), "/", len(sensor_ids), "sensors for MLAT")
@@ -359,7 +364,7 @@ def calc_mlat_sympy(sensor_ids, sensor_locations, sensor_timestamps, time_deltas
 
 
 
-def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
+def calc_positions(variance_cutoff=1000, use_sympy=False, limit=-1, debug=False):
 
     util.cur.execute('SELECT id, ecef_x, ecef_y, ecef_z FROM sensors')
     sensor_locations = {e[0]: util.GeoPoint('ecef', *e[1:]) for e in util.cur.fetchall()}
@@ -384,6 +389,8 @@ def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
         HAVING COUNT(*) >= 4
     ''')
 
+    calc_mlat_func = calc_mlat_sympy if use_sympy else calc_mlat
+
     it = 0
     for msg_id, sensor_ids, sensor_timestamps in tqdm(util.cur.fetchall()):
         it += 1
@@ -393,18 +400,19 @@ def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
         assert len(sensor_timestamps) == len(sensor_ids)
         
         #print(msg_id, sensor_ids, sensor_timestamps)
-        calc_mlat_func = calc_mlat_sympy if use_sympy else calc_mlat
         pos = calc_mlat_func(
             sensor_ids,
             sensor_locations,
             dict(zip(sensor_ids, sensor_timestamps)),
             #{sensor_ids[i]: sensor_timestamps[i] for i in range(len(sensor_ids))},
-            time_deltas
+            time_deltas,
+            debug=debug
         )
 
         if pos is None:
             #print(":(")
             continue
+
         #print(pos)
         util.cur.execute('''INSERT INTO msg_positions_raw VALUES (
             %s, %s, %s, %s
@@ -485,11 +493,19 @@ def post_process_positions():
         GROUP BY messages.icao
     ''')
 
+
+    def constrain_alt(point, min_alt, max_alt):
+        lat, lon, alt = point.to_lla()
+        alt = min(alt, max_alt)
+        alt = max(alt, min_alt)
+        return util.GeoPoint('wgs84', lat, lon, alt)
+
+
     OUTLIER_DISTANCE_CUTOFF = 20000 # 20km
     for messages in tqdm(util.cur.fetchall()):
         # all messages in a path
         messages = list(sorted([list(eval(e)) for e in eval(messages[0])]))
-        points = [util.GeoPoint('ecef', *e[1:]) for e in messages]
+        points = [constrain_alt(util.GeoPoint('ecef', *e[1:]), 0, 10000) for e in messages]
 
         bad_msgs = set()
         WINDOW_SIZE = 20
@@ -507,7 +523,7 @@ def post_process_positions():
         print("Removed", len(bad_msgs), "/", len(messages), "positions")
 
         messages = [e for e in messages if e[0] not in bad_msgs]
-        points = [util.GeoPoint('ecef', *e[1:]) for e in messages]
+        points = [constrain_alt(util.GeoPoint('ecef', *e[1:]), 0, 10000) for e in messages]
 
         # now, smooth the path
         WINDOW_SIZE = 10
@@ -534,3 +550,7 @@ def post_process_positions():
         )''', ([(messages[i][0], *smoothed_points[i]) for i in range(len(messages))]))
 
     util.conn.commit()
+
+
+#def analyze_error():
+    # for each message, check the error against factors, such as 

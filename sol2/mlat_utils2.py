@@ -13,7 +13,7 @@ import traceback
 import sympy
 
 M = np.diag([1, 1, 1, -1])
-C = 299792458
+C = 0.299792458
 
 @dataclass
 class Vertexer:
@@ -21,7 +21,7 @@ class Vertexer:
     nodes: np.ndarray
 
     # Defaults
-    v = np.longdouble(299792458)
+    v = C
 
     def __post_init__(self):
         # Calculate valid input range
@@ -182,7 +182,6 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debu
             )
             if debug:
                 print("Corrected location:", target_location)
-                print("difference:", np.subtract(target_location, calculated_location))
             
             calculated_locations.append(target_location)
         except:
@@ -202,6 +201,9 @@ def calc_mlat(sensor_ids, sensor_locations, sensor_timestamps, time_deltas, debu
     #return util.GeoPoint('ecef', *[e/len(calculated_locations) for e in sum_loc])
 
     # return median coordinates
+    if debug:
+        print(len(sensor_ids), "stations,", len(calculated_locations),
+            "locations calculated, out of possible", len(list(itertools.combinations(sensor_ids, 4))))
     return util.GeoPoint('ecef', *[statistics.median(e) for e in zip(*calculated_locations)])
 
 
@@ -336,7 +338,7 @@ def calc_mlat_sympy(sensor_ids, sensor_locations, sensor_timestamps, time_deltas
 
 
 
-def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
+def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1, debug=False):
 
     util.cur.execute('SELECT id, ecef_x, ecef_y, ecef_z FROM sensors')
     sensor_locations = {e[0]: util.GeoPoint('ecef', *e[1:]) for e in util.cur.fetchall()}
@@ -376,7 +378,8 @@ def calc_positions(variance_cutoff=1e-6, use_sympy=False, limit=-1):
             sensor_locations,
             dict(zip(sensor_ids, sensor_timestamps)),
             #{sensor_ids[i]: sensor_timestamps[i] for i in range(len(sensor_ids))},
-            time_deltas
+            time_deltas,
+            debug=debug
         )
 
         if pos is None:
